@@ -22,7 +22,7 @@ struct AnotacionTraza {
     long turno; // turno FIFO; -1 en las otras politicas
 };
 
-//R6: identidad logica y turno de la solicitud actual de cada hebra.
+// R6: identidad logica y turno de la solicitud actual de cada hebra.
 thread_local int id_hebra = -1;
 thread_local long turno_solicitud = -1;
 
@@ -154,8 +154,8 @@ public:
 private:
     void registrar(Tipo tipo, Accion accion, long turno) {
         // Se invoca exclusivamente mientras el monitor mantiene m.
-        // Commit 02: interfaz preparada; almacenamiento se agrega en commit 03.
-        (void)tipo; (void)accion; (void)turno;
+        if (traza_habilitada)
+            traza.push_back({id_hebra, tipo, accion, turno});
     }
 
     Politica politica;
@@ -180,14 +180,113 @@ struct ResultadoVerificacion {
 };
 
 ResultadoVerificacion verificar_traza(
-    const std::vector<AnotacionTraza>& traza, Politica) {
-    // Commit 03: la captura ya esta completa. La validacion semantica
-    // se incorpora en el commit siguiente.
+    const std::vector<AnotacionTraza>& traza, Politica politica) {
+
     ResultadoVerificacion r;
-    if (traza.empty()) {
-        r.politica_ok = false;
-        r.regla_incumplida = "traza vacia";
+    long entradas_fifo = 0;
+    int lectoras_activas = 0;
+    int escritoras_activas = 0;
+    int lectoras_pendientes = 0;
+    int escritoras_pendientes = 0;
+
+    auto fallar = [&](long i, const std::string& regla) {
+        if (r.politica_ok) {
+            r.politica_ok = false;
+            r.anotacion_error = i;
+            r.regla_incumplida = regla;
+        }
+    };
+
+    for (long i = 0; i < static_cast<long>(traza.size()); ++i) {
+        const AnotacionTraza& a = traza[static_cast<std::size_t>(i)];
+
+        if (a.hebra < 0)
+            fallar(i, "identificador logico de hebra invalido");
+        if (politica == Politica::Fifo && a.turno < 0)
+            fallar(i, "FIFO exige turno no negativo en toda anotacion");
+        if (politica != Politica::Fifo && a.turno != -1)
+            fallar(i, "las politicas no FIFO exigen turno -1");
+
+        if (a.accion == Accion::Pide) {
+            if (a.tipo == Tipo::Lectora) {
+                // Evidencia R6 para prioridad de escritores: la regla se puso a prueba.
+                if (politica == Politica::Escritores &&
+                    escritoras_pendientes > 0)
+                    ++r.evidencia;
+
+                // R6 Lectores: si no hay escritora activa, debe entrar inmediatamente;
+                // al conservarse el mutex, Entra debe ser la anotacion siguiente.
+                if (politica == Politica::Lectores &&
+                    escritoras_activas == 0) {
+                    const bool siguiente_es_su_entrada =
+                        i + 1 < static_cast<long>(traza.size()) &&
+                        traza[static_cast<std::size_t>(i + 1)].accion == Accion::Entra &&
+                        traza[static_cast<std::size_t>(i + 1)].tipo == Tipo::Lectora &&
+                        traza[static_cast<std::size_t>(i + 1)].hebra == a.hebra;
+                    if (!siguiente_es_su_entrada)
+                        fallar(i, "Lectores: una lectora que pide sin escritora activa debe entrar en la anotacion siguiente");
+                }
+                ++lectoras_pendientes;
+            } else {
+                ++escritoras_pendientes;
+            }
+            continue;
+        }
+
+        if (a.accion == Accion::Entra) {
+            if (politica == Politica::Fifo) {
+                if (a.turno != entradas_fifo)
+                    fallar(i, "FIFO: el k-esimo Entra debe corresponder al turno k");
+                ++entradas_fifo;
+            }
+
+            if (a.tipo == Tipo::Lectora) {
+                if (escritoras_activas != 0)
+                    fallar(i, "Todas: una lectora entra sin escritora activa");
+                if (lectoras_pendientes <= 0)
+                    fallar(i, "Entra de lectora sin solicitud pendiente");
+                if (politica == Politica::Escritores &&
+                    escritoras_pendientes > 0)
+                    fallar(i, "Escritores: una lectora entra sin escritoras pendientes");
+                if (politica == Politica::Lectores &&
+                    escritoras_pendientes > 0)
+                    ++r.evidencia;
+                if (politica == Politica::Fifo && lectoras_activas > 0)
+                    ++r.evidencia;
+                --lectoras_pendientes;
+                ++lectoras_activas;
+            } else {
+                if (lectoras_activas != 0 || escritoras_activas != 0)
+                    fallar(i, "Todas: una escritora entra sin lectoras ni escritora activas");
+                if (escritoras_pendientes <= 0)
+                    fallar(i, "Entra de escritora sin solicitud pendiente");
+                if (politica == Politica::Lectores && lectoras_pendientes > 0)
+                    fallar(i, "Lectores: una escritora entra sin lectoras pendientes");
+                --escritoras_pendientes;
+                ++escritoras_activas;
+            }
+            continue;
+        }
+
+        // Accion::Sale
+        if (a.tipo == Tipo::Lectora) {
+            if (lectoras_activas <= 0)
+                fallar(i, "Sale de lectora sin lectora activa");
+            else
+                --lectoras_activas;
+        } else {
+            if (escritoras_activas != 1)
+                fallar(i, "Sale de escritora sin exactamente una escritora activa");
+            else
+                --escritoras_activas;
+        }
     }
+
+    if (lectoras_activas != 0 || escritoras_activas != 0 ||
+        lectoras_pendientes != 0 || escritoras_pendientes != 0)
+        fallar(static_cast<long>(traza.size()),
+               "la traza termina con solicitudes activas o pendientes");
+
     return r;
 }
 
@@ -309,7 +408,7 @@ int main(int argc, char* argv[]) {
               << "max_lectoras_simultaneas=" << max_lectoras << "\n";
 
     bool politica_ok = true;
-    if (false && traza_habilitada) {
+    if (traza_habilitada) {
         const auto traza = monitor.obtener_traza();
         const auto resultado = verificar_traza(traza, politica);
         politica_ok = resultado.politica_ok;
@@ -326,3 +425,4 @@ int main(int argc, char* argv[]) {
               << ((invariantes_ok && politica_ok) ? "SI" : "NO") << "\n";
     return (invariantes_ok && politica_ok) ? 0 : 1;
 }
+

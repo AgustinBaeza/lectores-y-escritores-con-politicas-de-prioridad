@@ -10,8 +10,19 @@
 #include <system_error>
 #include <thread>
 #include <vector>
- 
+
 enum class Politica { Lectores, Escritores, Fifo };
+enum class Tipo { Lectora, Escritora };
+enum class Accion { Pide, Entra, Sale };
+
+struct AnotacionTraza {
+    int hebra;
+    Tipo tipo;
+    Accion accion;
+    long turno; // turno FIFO; -1 en las otras politicas
+};
+
+
 class ControlRW {
 public:
     virtual ~ControlRW() = default;

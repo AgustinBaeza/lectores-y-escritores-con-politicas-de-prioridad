@@ -19,7 +19,7 @@ struct AnotacionTraza {
     int hebra;
     Tipo tipo;
     Accion accion;
-    long turno; // turno FIFO; -1 en las otras politicas
+    long turno; // Turno FIFO; -1 en las otras politicas.
 };
 
 // R6: identidad logica y turno de la solicitud actual de cada hebra.
@@ -35,6 +35,8 @@ public:
     virtual void salir_escritura() = 0;
 };
 
+// R3, R4 y R5: monitor con prioridad de lectores,
+// prioridad de escritores y orden FIFO.
 class MonitorRW : public ControlRW {
 public:
     explicit MonitorRW(Politica p, bool habilitar_traza = true)
@@ -44,6 +46,7 @@ public:
         std::unique_lock<std::mutex> lk(m);
         long turno = -1;
 
+        // R5: politica FIFO para solicitudes de lectura.
         if (politica == Politica::Fifo) {
             turno = siguiente_turno++;
             turno_solicitud = turno;
@@ -58,11 +61,12 @@ public:
             ++turno_actual;
             registrar(Tipo::Lectora, Accion::Entra, turno);
 
-            // R5/R7: puede habilitar a la siguiente lectora consecutiva.
+            // R5/R7: permite el ingreso de lectoras consecutivas.
             cv_fifo.notify_all();
             return;
         }
 
+        // R3/R4: espera segun la prioridad de lectores o escritores.
         turno_solicitud = -1;
         registrar(Tipo::Lectora, Accion::Pide, -1);
         ++lectoras_esperando;
@@ -96,6 +100,7 @@ public:
         std::unique_lock<std::mutex> lk(m);
         long turno = -1;
 
+        // R5: politica FIFO para solicitudes de escritura.
         if (politica == Politica::Fifo) {
             turno = siguiente_turno++;
             turno_solicitud = turno;
@@ -112,6 +117,7 @@ public:
             return;
         }
 
+        // R3/R4: espera segun la prioridad de lectores o escritores.
         turno_solicitud = -1;
         registrar(Tipo::Escritora, Accion::Pide, -1);
         ++escritoras_esperando;
@@ -133,11 +139,14 @@ public:
         escritora_activa = false;
 
         if (politica == Politica::Fifo) {
+            // R5: despertar las solicitudes FIFO pendientes.
             cv_fifo.notify_all();
         } else if (politica == Politica::Escritores &&
                    escritoras_esperando > 0) {
+            // R4: mantener la prioridad de las escritoras pendientes.
             cv_escritoras.notify_one();
         } else if (lectoras_esperando > 0) {
+            // R3: prioridad de lectores; en R4 no quedan escritoras pendientes.
             cv_lectoras.notify_all();
         } else {
             cv_escritoras.notify_one();
@@ -168,6 +177,8 @@ private:
     int lectoras_esperando = 0;
     int escritoras_esperando = 0;
     bool escritora_activa = false;
+
+    // R5: asignacion y avance de turnos FIFO.
     long siguiente_turno = 0;
     long turno_actual = 0;
 };
@@ -242,12 +253,12 @@ ResultadoVerificacion verificar_traza(
 
             if (a.tipo == Tipo::Lectora) {
                 if (escritoras_activas != 0)
-                    fallar(i, "Todas: una lectora entra sin escritora activa");
+                    fallar(i, "Todas: una lectora entra con escritora activa");
                 if (lectoras_pendientes <= 0)
                     fallar(i, "Entra de lectora sin solicitud pendiente");
                 if (politica == Politica::Escritores &&
                     escritoras_pendientes > 0)
-                    fallar(i, "Escritores: una lectora entra sin escritoras pendientes");
+                    fallar(i, "Escritores: una lectora entra con escritoras pendientes");
                 if (politica == Politica::Lectores &&
                     escritoras_pendientes > 0)
                     ++r.evidencia;
@@ -257,18 +268,18 @@ ResultadoVerificacion verificar_traza(
                 ++lectoras_activas;
             } else {
                 if (lectoras_activas != 0 || escritoras_activas != 0)
-                    fallar(i, "Todas: una escritora entra sin lectoras ni escritora activas");
+                    fallar(i, "Todas: una escritora entra con lectores o escritora activos");
                 if (escritoras_pendientes <= 0)
                     fallar(i, "Entra de escritora sin solicitud pendiente");
                 if (politica == Politica::Lectores && lectoras_pendientes > 0)
-                    fallar(i, "Lectores: una escritora entra sin lectoras pendientes");
+                    fallar(i, "Lectores: una escritora entra con lectoras pendientes");
                 --escritoras_pendientes;
                 ++escritoras_activas;
             }
             continue;
         }
 
-        // Accion::Sale
+        // Accion::Sale.
         if (a.tipo == Tipo::Lectora) {
             if (lectoras_activas <= 0)
                 fallar(i, "Sale de lectora sin lectora activa");
@@ -290,6 +301,7 @@ ResultadoVerificacion verificar_traza(
     return r;
 }
 
+// R2: registro compartido usado para comprobar lecturas consistentes.
 struct Registro {
     long version = 0;
     long doble_version = 0;
@@ -297,6 +309,9 @@ struct Registro {
 
 Registro reg;
 long K, dur_lec, dur_esc;
+
+// R2/R7: contadores de diagnostico separados del estado del monitor.
+// No participan en las decisiones de admision.
 std::atomic<int> lectoras_dentro{0}, escritoras_dentro{0}, max_lectoras{0};
 std::atomic<long> inconsistencias{0}, violaciones{0};
 
@@ -335,6 +350,7 @@ void escritora(ControlRW* c, int id) {
     }
 }
 
+// R1: conversion y validacion de argumentos numericos.
 bool leer(const char* s, long& v) {
     errno = 0;
     char* fin = nullptr;
@@ -370,6 +386,7 @@ int main(int argc, char* argv[]) {
     if (K > LONG_MAX / (2 * E) || K > LONG_MAX / (L + E))
         return error("2EK o (L+E)K no cabe en un long");
 
+    // El argumento opcional "notraza" desactiva la captura y verificacion de R6.
     const bool traza_habilitada = argc != 9;
     if (argc == 9 && std::string(argv[8]) != "notraza")
         return error("el ultimo parametro solo puede ser notraza");

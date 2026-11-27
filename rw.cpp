@@ -22,11 +22,18 @@ struct AnotacionTraza {
     long turno; // turno FIFO; -1 en las otras politicas
 };
 
-
+//R6: identidad logica y turno de la solicitud actual de cada hebra.
 thread_local int id_hebra = -1;
 thread_local long turno_solicitud = -1;
 
-
+class ControlRW {
+public:
+    virtual ~ControlRW() = default;
+    virtual void entrar_lectura() = 0;
+    virtual void salir_lectura() = 0;
+    virtual void entrar_escritura() = 0;
+    virtual void salir_escritura() = 0;
+};
 
 class MonitorRW : public ControlRW {
 public:

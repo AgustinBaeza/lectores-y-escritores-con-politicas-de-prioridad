@@ -348,8 +348,8 @@ int error(const std::string& msg) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 8)
-        return error("uso: ./rw <modo> <politica> <L> <E> <K> <dur_lec_us> <dur_esc_us>");
+    if (argc != 8 && argc != 9)
+        return error("uso: ./rw <modo> <politica> <L> <E> <K> <dur_lec_us> <dur_esc_us> [notraza]");
 
     const std::string modo = argv[1];
     const std::string pol = argv[2];
@@ -370,7 +370,9 @@ int main(int argc, char* argv[]) {
     if (K > LONG_MAX / (2 * E) || K > LONG_MAX / (L + E))
         return error("2EK o (L+E)K no cabe en un long");
 
-    const bool traza_habilitada = true;
+    const bool traza_habilitada = argc != 9;
+    if (argc == 9 && std::string(argv[8]) != "notraza")
+        return error("el ultimo parametro solo puede ser notraza");
     if (modo == "atomic")
         return error("aun no implementado");
 
@@ -425,4 +427,3 @@ int main(int argc, char* argv[]) {
               << ((invariantes_ok && politica_ok) ? "SI" : "NO") << "\n";
     return (invariantes_ok && politica_ok) ? 0 : 1;
 }
-

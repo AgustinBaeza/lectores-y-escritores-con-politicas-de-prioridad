@@ -21,52 +21,127 @@ public:
     virtual void salir_escritura() = 0;
 };
  
-// R3
+// R3, R4 y R5
 class MonitorRW : public ControlRW {
 public:
     explicit MonitorRW(Politica p) : politica(p) {}
- 
+
     void entrar_lectura() override {
         std::unique_lock<std::mutex> lk(m);
+
+        // R5: politica FIFO
+        if (politica == Politica::Fifo) {
+            const long turno = siguiente_turno++;
+
+            cv_fifo.wait(lk, [this, turno] {
+                return turno == turno_actual &&
+                       !escritora_activa;
+            });
+
+            lectoras_activas++;
+            turno_actual++;
+
+            // Permitir el ingreso de lectoras consecutivas
+            cv_fifo.notify_all();
+            return;
+        }
+
+        // R3 y R4
         lectoras_esperando++;
-        // la lectora entra si no hay escritora activa, aunque haya escritoras esperando
-        cv_lectoras.wait(lk, [this] { return !escritora_activa; });
+
+        cv_lectoras.wait(lk, [this] {
+            return !escritora_activa &&
+                   (politica != Politica::Escritores ||
+                    escritoras_esperando == 0);
+        });
+
         lectoras_esperando--;
         lectoras_activas++;
     }
- 
+
     void salir_lectura() override {
         std::unique_lock<std::mutex> lk(m);
+
         lectoras_activas--;
-        if (lectoras_activas == 0)
-            cv_escritoras.notify_one();  // despertar a una escritora
+
+        if (lectoras_activas == 0) {
+            if (politica == Politica::Fifo)
+                cv_fifo.notify_all();
+            else
+                cv_escritoras.notify_one();
+        }
     }
- 
+
     void entrar_escritura() override {
         std::unique_lock<std::mutex> lk(m);
-        // la escritora entra solo si no hay nadie activo ni lectoras pendientes
+
+        // R5: politica FIFO
+        if (politica == Politica::Fifo) {
+            const long turno = siguiente_turno++;
+
+            cv_fifo.wait(lk, [this, turno] {
+                return turno == turno_actual &&
+                       !escritora_activa &&
+                       lectoras_activas == 0;
+            });
+
+            escritora_activa = true;
+            turno_actual++;
+            return;
+        }
+
+        // R3 y R4
+        escritoras_esperando++;
+
         cv_escritoras.wait(lk, [this] {
-            return !escritora_activa && lectoras_activas == 0 && lectoras_esperando == 0;
+            return !escritora_activa &&
+                   lectoras_activas == 0 &&
+                   (politica != Politica::Lectores ||
+                    lectoras_esperando == 0);
         });
+
+        escritoras_esperando--;
         escritora_activa = true;
     }
- 
+
     void salir_escritura() override {
         std::unique_lock<std::mutex> lk(m);
+
         escritora_activa = false;
-        if (lectoras_esperando > 0)
-            cv_lectoras.notify_all();    // las lectoras pendientes tienen prioridad
-        else
+
+        if (politica == Politica::Fifo) {
+            // R5: despertar solicitudes pendientes
+            cv_fifo.notify_all();
+
+        } else if (politica == Politica::Escritores &&
+                   escritoras_esperando > 0) {
+            // R4: prioridad de escritores
             cv_escritoras.notify_one();
+
+        } else if (lectoras_esperando > 0) {
+            // R3: prioridad de lectores, o R4 sin escritoras pendientes
+            cv_lectoras.notify_all();
+
+        } else {
+            cv_escritoras.notify_one();
+        }
     }
- 
+
 private:
-    Politica politica;  // por ahora solo lectores
+    Politica politica;
     std::mutex m;
-    std::condition_variable cv_lectoras, cv_escritoras;
+
+    std::condition_variable cv_lectoras, cv_escritoras, cv_fifo;
+
     int lectoras_activas = 0;
     int lectoras_esperando = 0;
+    int escritoras_esperando = 0;
+
     bool escritora_activa = false;
+
+    // R5: control de turnos FIFO
+    long siguiente_turno = 0;
+    long turno_actual = 0;
 };
  
 // R2
@@ -147,8 +222,15 @@ int main(int argc, char* argv[]) {
     if (argc == 9 && std::string(argv[8]) != "notraza")
         return error("el ultimo parametro solo puede ser notraza");
  
-    if (modo == "atomic" || pol != "lectores") return error("aun no implementado");
-    MonitorRW monitor(Politica::Lectores);
+    if (modo == "atomic")
+    return error("aun no implementado");
+    Politica politica = Politica::Lectores;
+    if (pol == "escritores")
+    politica = Politica::Escritores;
+    else if (pol == "fifo")
+    politica = Politica::Fifo;
+
+    MonitorRW monitor(politica);
  
     std::vector<std::thread> hebras;
     bool fallo = false;
